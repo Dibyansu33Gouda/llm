@@ -4,15 +4,17 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
-from weather_tool import get_weather_decl, TOOLS
+from weather_tool import DECLS, TOOLS
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-declaration = types.FunctionDeclaration(**get_weather_decl)
+declarations = [types.FunctionDeclaration(**d) for d in DECLS]
 config = types.GenerateContentConfig(
-    tools=[types.Tool(function_declarations=[declaration])]
+    tools=[types.Tool(function_declarations=declarations)]
 )
+
+MAX_STEPS = 6
 
 
 def ask(contents):
@@ -30,34 +32,45 @@ def ask(contents):
     raise SystemExit("Gave up after 4 tries")
 
 
-question = "Should I carry an umbrella in Berhampur today?"
-user_msg = types.Content(role="user", parts=[types.Part(text=question)])
+def run_tool(call):
+    func = TOOLS.get(call.name)
+    if func is None:
+        return f"Unknown tool: {call.name}"
+    try:
+        return func(**(call.args or {}))
+    except Exception as e:
+        return f"Tool error: {e}"
 
-# Call 1: the model decides whether it needs a tool
-response = ask([user_msg])
 
-calls = response.function_calls
-if not calls:
-    print("answer:", response.text)  # model answered without any tool
-    raise SystemExit
+def run_agent(question):
+    contents = [types.Content(role="user", parts=[types.Part(text=question)])]
 
-if not response.candidates:
-    raise SystemExit("No candidates returned")
+    for step in range(MAX_STEPS):
+        response = ask(contents)
+        if not response.candidates:
+            return "No response from model"
 
-call = calls[0]
-model_msg = response.candidates[0].content
+        calls = response.function_calls
+        if not calls:
+            return response.text  # model has what it needs, done
 
-# Your Python code does the real work
-result = TOOLS[call.name](**(call.args or {}))
-print("tool result:", result)
+        contents.append(response.candidates[0].content)
 
-# Call 2: replay the story so far, plus the tool result
-tool_msg = types.Content(
-    role="user",
-    parts=[types.Part.from_function_response(
-        name=call.name,
-        response={"result": result},
-    )],
-)
-final = ask([user_msg, model_msg, tool_msg])
-print("answer:", final.text)
+        result_parts = []
+        for call in calls:
+            print(f"step {step + 1}: {call.name}({call.args})")
+            result = run_tool(call)
+            print(f"   -> {result}")
+            result_parts.append(
+                types.Part.from_function_response(
+                    name=call.name,
+                    response={"result": result},
+                )
+            )
+        contents.append(types.Content(role="user", parts=result_parts))
+
+    return "Stopped: too many steps"
+
+
+question = "Which is warmer right now, Berhampur or Hyderabad? Give me the warmer one's temperature in Fahrenheit."
+print("answer:", run_agent(question))
